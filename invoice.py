@@ -1,79 +1,87 @@
 # invoice.py
+#!/usr/bin/env python3
 import sqlite3
 import pandas as pd
-import numexpr as ne
+from math import ceil
+import re
 
-DB_PATH = "elevators.db"
+DB = "elevators.db"
+WEIGHT_PATTERN = re.compile(r"(\d+(?:\.\d+)?)")
 
-def load_tables():
-    conn     = sqlite3.connect(DB_PATH)
-    models   = pd.read_sql("SELECT * FROM models", conn)
-    parts    = pd.read_sql("SELECT * FROM parts_rules", conn)
+def load_parts(db_path=DB):
+    conn = sqlite3.connect(db_path)
+    df   = pd.read_sql("SELECT * FROM parts_rules", conn)
     conn.close()
-    return models, parts
+    df.columns = [c.strip() for c in df.columns]
+    return df
 
-def choose_model(models_df):
-    print("\nAvailable models:")
-    for idx, row in models_df.iterrows():
-        print(f"  [{idx}] {row.model_id} — capacity {row.max_persons}p, "
-              f"{row.max_floors}f, base ${float(row.base_price):,.2f}")
-    while True:
-        sel = input("Enter the number in [ ] for the model you want: ")
-        if sel.isdigit() and int(sel) in models_df.index:
-            return models_df.loc[int(sel)]
-        print("↳ Invalid choice; try again.")
+def safe_eval(expr, ctx):
+    try:
+        return eval(expr, {"__builtins__": None}, {**ctx, "ceil": ceil})
+    except Exception:
+        return False
 
-def compute_invoice(model_row, persons, floors, trans_cost, tech_days, tech_rate, elec_days, elec_rate, parts_df):
+def main():
+    # Gather inputs
+    P            = int(input("How many persons? "))
+    F            = int(input("How many floors?  "))
+    machine_room = input("¿Con cuarto de máquinas? (y/n): ").strip().lower().startswith("y")
+    door         = input("Puertas — manuales (m) o automáticas (a)? ").strip().lower()
+    door_type    = "manual" if door.startswith("m") else "automatica"
+    control_type = input("Monarch o Heytech? ").strip().title()
+    encoder      = False
+    if control_type == "Heytech":
+        encoder = input("¿Con encoder? (y/n): ").strip().lower().startswith("y")
+    gearless = not machine_room or input("¿Motor gearless? (y/n): ").strip().lower().startswith("y")
+    if P <= 4 and F <= 3:
+        include_cyl = input("¿Incluir cilindro hidráulico BTD-55? (y/n): ")\
+                      .strip().lower().startswith("y")
+    else:
+        include_cyl = False
+  
+
+    # Build context
+    ctx = {
+        "P": P, "F": F,
+        "machine_room": machine_room,
+        "door_type": door_type,
+        "control_type": control_type,
+        "encoder": encoder,
+        "gearless": gearless,
+        "hydraulic_cylinder": include_cyl
+    }
+
+    # Load and filter parts
+    parts_df = load_parts()
+    mask = parts_df["condition_expr"].apply(lambda e: safe_eval(str(e), ctx))
+    rules = parts_df[mask]
+
+    # Compute capacity from motor weight
+    motor_rows = rules[rules["unit_weight"].notna()]
+    if not motor_rows.empty:
+        capacities = motor_rows["unit_weight"] * motor_rows["qty_formula"].astype(float)
+        capacity = int(capacities.max())
+        print(f"Capacity (max load): {capacity} kg")
+    else:
+        print("Capacity (max load): n/a")
+
+    # Compute line items
     lines = []
-    total = float(model_row.base_price)
-
-    # Base price
-    lines.append(("Base price", 1, total))
-
-    # Parts by formula
-    for _, part in parts_df.iterrows():
-        qty = int(ne.evaluate(part.qty_formula, {"P": persons, "F": floors}))
+    total = 0.0
+    for _, part in rules.iterrows():
+        qty = int(safe_eval(str(part["qty_formula"]), ctx) or 0)
         if qty <= 0:
             continue
-        unit_price = float(part.unit_price)
-        lines.append((part.description, qty, unit_price))
-        total += qty * unit_price
+        up = float(part["iva"])
+        lines.append((part["description"], qty, up))
+        total += qty * up
 
-    # Transporte
-    lines.append(("Transporte", 1, trans_cost));      total += trans_cost
-    # Técnico
-    lines.append(("Técnico (montaje)", tech_days, tech_rate)); total += tech_days * tech_rate
-    # Eléctrico
-    lines.append(("Eléctrico (montaje)", elec_days, elec_rate)); total += elec_days * elec_rate
-
-    return lines, total
+    # Print invoice
+    print("\nItemized Invoice\n" + "-"*60)
+    for desc, qty, up in lines:
+        print(f"{desc:35s} x{qty:3d} @ ${up:8.2f} = ${qty*up:8.2f}")
+    print("-"*60)
+    print(f"{'Grand Total':35s}     ${total:10.2f}")
 
 if __name__ == "__main__":
-    # 1) Gather your inputs
-    persons    = int(input("Number of persons: "))
-    floors     = int(input("Number of floors: "))
-    trans_cost = float(input("Transporte cost: "))
-    tech_days  = int(input("Técnico days: "))
-    tech_rate  = float(input("Técnico daily rate: "))
-    elec_days  = int(input("Eléctrico days: "))
-    elec_rate  = float(input("Eléctrico daily rate: "))
-
-    # 2) Load DB tables
-    models_df, parts_df = load_tables()
-
-    # 3) Prompt for which model to use
-    model_row = choose_model(models_df)
-
-    # 4) Compute the invoice
-    lines, grand_total = compute_invoice(
-        model_row, persons, floors,
-        trans_cost, tech_days, tech_rate,
-        elec_days, elec_rate, parts_df
-    )
-
-    # 5) Print it out neatly
-    print(f"\nInvoice for Model {model_row.model_id}\n" + "-"*50)
-    for desc, qty, price in lines:
-        print(f"{desc:25s} x{qty:2d} @ ${price:8.2f} = ${qty*price:8.2f}")
-    print("-"*50)
-    print(f"{'Grand Total':25s}     ${grand_total:8.2f}")
+    main()
