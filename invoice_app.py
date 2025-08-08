@@ -8,12 +8,17 @@ import streamlit as st
 from math import ceil
 from docxtpl import DocxTemplate, InlineImage
 from docx.shared import Mm
+import sqlalchemy as sa
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 HERE     = os.path.dirname(os.path.abspath(__file__))
 DB_PATH  = os.path.join(HERE, "elevators.db")
 TEMPLATE = os.path.join(HERE, "invoice_template.docx")
 IMG_DIR  = os.path.join(HERE, "images")
+
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DB_PATH}")
+engine   = sa.create_engine(DATABASE_URL)
+    
 
 # regex for weight fallback
 WEIGHT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*kg", flags=re.IGNORECASE)
@@ -56,17 +61,16 @@ CONTROL_IMAGES = {
 
 @st.cache_data
 def load_parts():
-    conn = sqlite3.connect(DB_PATH)
-    df   = pd.read_sql("SELECT * FROM parts_rules", conn)
-    conn.close()
+    with engine.connect() as conn:
+        df = pd.read_sql("SELECT * FROM parts_rules", conn)
     df.columns = [c.strip() for c in df.columns]
     return df
 
+#cuarto de maquinas la mano de obra cuesta valor adicional de 350|
+#hidraulico y motor
 def save_parts(df: pd.DataFrame):
-    conn = sqlite3.connect(DB_PATH)
-    df.to_sql("parts_rules", conn, if_exists="replace", index=False)
-    conn.close()
-
+    with engine.begin() as conn:
+        df.to_sql("parts_rules", conn, if_exists="replace", index=False)
 
 def safe_eval(expr, ctx):
     try:
@@ -76,7 +80,7 @@ def safe_eval(expr, ctx):
 
 
 
-def compute_lines(ctx, parts_df, cabina_price, shipping_cost):
+def compute_lines(ctx, parts_df, cabina_price, shipping_cost, cabina_cost):
     # filter by your condition expressions
 
     
@@ -97,6 +101,8 @@ def compute_lines(ctx, parts_df, cabina_price, shipping_cost):
 
         iva_up   = float(part.get("iva",   0.0))
         venta_up = float(part.get("venta", 0.0))
+        costo_unit = float(part.get("costo", 0.0))
+
 
         # accumulate both totals
         total_iva   += qty * iva_up
@@ -114,6 +120,8 @@ def compute_lines(ctx, parts_df, cabina_price, shipping_cost):
         lines.append({
         "Description": part["description"],
         "Qty":         qty,
+        "Costo Unitario":  f"${costo_unit:,.2f}",
+        "Total Costo":     f"${qty * costo_unit:,.2f}",
         "Unit Price (IVA)":  f"${iva_up:,.2f}",
         "Line Total (IVA)":  f"${qty * iva_up:,.2f}",
         "Unit Price (VTA)":  f"${venta_up:,.2f}",
@@ -125,24 +133,28 @@ def compute_lines(ctx, parts_df, cabina_price, shipping_cost):
         total_iva   += cabina_price
         total_venta += cabina_price
         lines.append({
-            "Description": "Cabina",
-            "Qty":         1,
-            "Unit Price (IVA)":  f"${iva_up:,.2f}",
-            "Line Total (IVA)":  f"${qty * iva_up:,.2f}",
-            "Unit Price (VTA)":  f"${venta_up:,.2f}",
-            "Line Total (VTA)":  f"${qty * venta_up:,.2f}",
+           "Description":     "Cabina",
+            "Qty":             1,
+           "Costo Unitario":  f"${cabina_cost:,.2f}",
+           "Total Costo":     f"${cabina_cost:,.2f}",
+            "Unit Price (VTA)": f"${cabina_price:,.2f}",
+            "Line Total (VTA)": f"${cabina_price:,.2f}",
+           "Unit Price (IVA)": f"${cabina_price:,.2f}",
+            "Line Total (IVA)": f"${cabina_price:,.2f}",
         })
     #envio
-    if precio_envio > 0:
-        total_iva += precio_envio
-        total_venta += precio_envio
+    if shipping_cost >= 0:
+        total_iva   += shipping_cost
+        total_venta += shipping_cost
         lines.append({
-            "Description": "Precio de envío",
-            "Qty":         1,
-            "Unit Price (IVA)":  f"${iva_up:,.2f}",
-            "Line Total (IVA)":  f"${qty * iva_up:,.2f}",
-            "Unit Price (VTA)":  f"${venta_up:,.2f}",
-            "Line Total (VTA)":  f"${qty * venta_up:,.2f}",
+            "Description":    "Precio de envío",
+            "Qty":            1,
+            "Costo Unitario": f"$0.00",
+            "Total Costo":    f"$0.00",
+            "Unit Price (VTA)": f"${shipping_cost:,.2f}",
+            "Line Total (VTA)": f"${shipping_cost:,.2f}",
+            "Unit Price (IVA)": f"${shipping_cost:,.2f}",
+            "Line Total (IVA)": f"${shipping_cost:,.2f}",
         })
         
 
@@ -192,14 +204,15 @@ precio_envio = st.number_input(
     step=1.0,
     format="%.2f"
 )
-gearless = True if not machine else st.radio("¿Motor gearless?", ("Sí","No"))=="Sí"
-cabina   = st.number_input("🚪 Cabina (one‑off)",0.0)
+
+cabina   = st.number_input("🚪 Cabina (venta unitaria)",0.0, step=0.01, format="%.2f")
+costo_cabina = st.number_input("🏷️ Costo de Cabina (costo unitario)", 0.0, step=0.01, format="%.2f")
 if P <= 3 and F <= 3:
     hydraulic_cylinder = st.radio(
         "¿Incluir cilindro hidráulico BTD-55?", ("Sí","No")) == "Sí"
 else:
     hydraulic_cylinder = False
-
+#remove this stray branch that sets an unused variable:
 if not hydraulic_cylinder and P == 3 and F <= 3:
     machine_room = True
 
@@ -217,7 +230,6 @@ ctx = {"P":P,
        "door_type":door_key,
        "control_type":control,
        "encoder":encoder,
-       "gearless":gearless,
        "hydraulic_cylinder": hydraulic_cylinder
        }
 if "show_preview" not in st.session_state:
@@ -227,7 +239,7 @@ include_civil = st.checkbox("✏️ Incluir tabla de Trabajos de Obra Civil", va
 shipping = precio_envio
 
     # 1) Unpack both totals
-lines, total_iva, total_venta, cap = compute_lines(ctx, parts_df, cabina, shipping)
+lines, total_iva, total_venta, cap = compute_lines(ctx, parts_df, cabina, shipping, costo_cabina)
 if st.button("🔍 Previsualizar Invoice"):
     st.session_state.show_preview = not st.session_state.show_preview
 
@@ -256,6 +268,8 @@ if st.session_state.show_preview:
             column_config={
                 "Description":      st.column_config.TextColumn("Descripción", disabled=False),
                 "Qty":              st.column_config.NumberColumn("Cantidad",),
+                "Costo Unitario":   st.column_config.TextColumn("Costo Unitario", disabled=True),
+                "Total Costo":      st.column_config.TextColumn("Total Costo", disabled=True),
                 "Unit Price (VTA)": st.column_config.TextColumn("Precio Unit. (VTA)"),
                 "Unit Price (IVA)": st.column_config.TextColumn("Precio Unit. (IVA)", disabled=True),
                 "Line Total (VTA)": st.column_config.TextColumn("Total (VTA)", disabled=True),
@@ -292,6 +306,11 @@ if st.session_state.show_preview:
     # 7) Format back to “$X,XXX.XX”
     for col in ["Unit Price (VTA)", "Unit Price (IVA)", "Line Total (VTA)", "Line Total (IVA)"]:
         working_df[col] = working_df[col].map(lambda x: f"${x:,.2f}")
+    
+    for c in ["Costo Unitario", "Total Costo"]:
+        working_df[c] = working_df[c].map(
+            lambda x: f"${float(str(x).replace('$','').replace(',','')):,.2f}"
+        )
 
     # 8) Persist for export
     st.session_state["invoice_lines"]     = working_df.to_dict("records")
@@ -307,12 +326,20 @@ if st.session_state.show_preview:
             .astype(float)
             .sum()
     )
+    st.session_state["total_costo_edited"] = (
+       working_df["Total Costo"]
+           .str.replace(r"[\$,]", "", regex=True)
+           .astype(float)
+           .sum()
+   )
 
     # 9) Show final table & metrics
     st.dataframe(working_df, use_container_width=True)
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     c1.metric("💲 Total sin IVA", f"${st.session_state['total_venta_edited']:,.2f}")
     c2.metric("💰 Total con IVA", f"${st.session_state['total_iva_edited']:,.2f}")
+    c3.metric("Costo total", f"${st.session_state['total_costo_edited']:,.2f}")
+
 
 
 
@@ -351,7 +378,6 @@ if st.button("📝 Generar Invoice en Word"):
         "door_text":        door_text,
         "machine_room_text":"Con cuarto de máquinas" if machine else "Sin cuarto de máquinas",
         "encoder_text":     "Con encoder" if encoder else "No encoder",
-        "gearless_text":    "Gearless" if gearless else "Geared",
         "capacity":         f"{cap:.0f} kg" if cap else "n/a",
         "ubicacion":        ubicacion,
         "shipping_cost":    f"${precio_envio:,.2f}",
@@ -365,6 +391,8 @@ if st.button("📝 Generar Invoice en Word"):
         "control_image":    ctrl_img,
         "include_civil":    include_civil
     }
+
+    port = int(os.getenv("PORT", "8501"))
 
     # render and offer download
     tpl.render(context)

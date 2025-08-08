@@ -1,17 +1,19 @@
 # invoice.py
 #!/usr/bin/env python3
-import sqlite3
+import sqlalchemy as sa
+import os
 import pandas as pd
 from math import ceil
 import re
 
-DB = "elevators.db"
+DB = os.path.join(os.path.dirname(__file__), "elevators.db")
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DB}")
+engine = sa.create_engine(DATABASE_URL)
 WEIGHT_PATTERN = re.compile(r"(\d+(?:\.\d+)?)")
 
-def load_parts(db_path=DB):
-    conn = sqlite3.connect(db_path)
-    df   = pd.read_sql("SELECT * FROM parts_rules", conn)
-    conn.close()
+def load_parts(engine=engine):
+    with engine.connect() as conn:
+        df = pd.read_sql("SELECT * FROM parts_rules", conn)
     df.columns = [c.strip() for c in df.columns]
     return df
 
