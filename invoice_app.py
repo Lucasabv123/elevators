@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import etl
 import os
 import io
 import re
@@ -165,27 +166,66 @@ def compute_lines(ctx, parts_df, cabina_price, shipping_cost, cabina_cost):
 st.set_page_config(page_title="Elevator Invoice", layout="wide")
 st.title("🏗️ Casa del Ascensor")
 
+# --- Simple password gate ---
+REQUIRED_PW = os.getenv("APP_PASSWORD")
+if REQUIRED_PW:
+    # keep users logged in during session
+    if "authed" not in st.session_state:
+        st.session_state.authed = False
+
+    with st.sidebar:
+        st.subheader("🔒 Acceso")
+        pw = st.text_input("Password", type="password")
+        if st.button("Entrar"):
+            st.session_state.authed = (pw == REQUIRED_PW)
+            if not st.session_state.authed:
+                st.error("Password incorrecto")
+
+    if not st.session_state.authed:
+        st.stop()   # block the rest of the app until correct
+
 # ── Admin: edit costo/venta ─────────────────────────────────────────────────────
 with st.sidebar:
     st.header("🔧 Admin")
-    edit_mode = st.checkbox("Editar precios (costo / venta)")
+
+    # --- Price editor ---
+    edit_mode = st.checkbox("Editar precios (costo / venta)", value=False)
     if edit_mode:
         parts_df = load_parts()
         edited = st.data_editor(
-            parts_df[["part_id","description","costo","venta"]],
-            num_rows="dynamic", use_container_width=True
+            parts_df[["part_id", "description", "costo", "venta"]],
+            num_rows="dynamic",
+            use_container_width=True,
+            key="price_editor",
         )
-        if st.button("Guardar cambios"):
+        if st.button("💾 Guardar cambios", type="primary", key="save_prices"):
             full = parts_df.set_index("part_id")
             for pid in edited["part_id"]:
                 full.at[pid, "costo"] = float(
-                    edited.loc[edited["part_id"]==pid, "costo"].iloc[0]
+                    edited.loc[edited["part_id"] == pid, "costo"].iloc[0]
                 )
                 full.at[pid, "venta"] = float(
-                    edited.loc[edited["part_id"]==pid, "venta"].iloc[0]
+                    edited.loc[edited["part_id"] == pid, "venta"].iloc[0]
                 )
             save_parts(full.reset_index())
             st.success("Precios actualizados.")
+
+    st.divider()
+
+    # --- One-click ETL: Elevators.xlsx -> DB ---
+    st.subheader("📥 Cargar Excel → DB")
+    st.caption(
+        "Ejecuta el ETL para poblar/actualizar la tabla `parts_rules` desde *Elevators.xlsx*."
+        " Usa `DATABASE_URL` si está definido; de lo contrario, SQLite local."
+    )
+    if st.button("Cargar ahora", key="run_etl"):
+        try:
+            import etl  # ensure imported at top of file too
+            etl.load_excel_to_db()
+            st.success("✅ Carga completada. Tabla `parts_rules` actualizada.")
+        except Exception as e:
+            st.error(f"❌ Error cargando datos: {e}")
+
 
 
 # — Inputs —
