@@ -6,13 +6,19 @@ on:
 
 permissions:
   contents: read
-  packages: write   # needed for pushing to GHCR
+  packages: write   # needed to push to GHCR
 
 jobs:
-  build-push:
+  build-push-deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # (optional) quick sanity check — keep if you like
+      - name: Sanity check
+        run: |
+          test -f Dockerfile || { echo "Dockerfile missing"; exit 1; }
+          python -m py_compile invoice_app.py etl.py
 
       - name: Set image meta
         id: meta
@@ -37,3 +43,9 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.IMAGE }}:${{ steps.meta.outputs.TAG_SHA }}
             ${{ steps.meta.outputs.IMAGE }}:${{ steps.meta.outputs.TAG_LATEST }}
+
+      # 🔔 Auto-redeploy Render (service-specific Deploy Hook URL stored as a secret)
+      - name: Trigger Render deploy
+        if: ${{ secrets.RENDER_DEPLOY_HOOK != '' }}
+        run: |
+          curl -fsSL -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"
