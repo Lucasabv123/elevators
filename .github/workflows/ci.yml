@@ -3,27 +3,16 @@ name: CI/CD
 on:
   push:
     branches: ["main"]
-  pull_request:
 
 permissions:
   contents: read
-  packages: write   # allow pushing to GHCR
+  packages: write   # needed for pushing to GHCR
 
 jobs:
-  build-push-deploy:
+  build-push:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install deps (sanity check)
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          python -m py_compile invoice_app.py etl.py
 
       - name: Set image meta
         id: meta
@@ -40,8 +29,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Build prod image (no ETL baked in)
-      - name: Build (prod)
+      - name: Build & push image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -49,12 +37,3 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.IMAGE }}:${{ steps.meta.outputs.TAG_SHA }}
             ${{ steps.meta.outputs.IMAGE }}:${{ steps.meta.outputs.TAG_LATEST }}
-          build-args: |
-            APP_ENV=prod
-
-      # Optional: ping Render Deploy Hook to redeploy with the new image
-      # Create a "Deploy Hook" in Render and save the URL as a secret: RENDER_DEPLOY_HOOK
-      - name: Trigger Render deploy
-        if: ${{ secrets.RENDER_DEPLOY_HOOK != '' }}
-        run: |
-          curl -fsSL -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"
