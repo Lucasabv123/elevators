@@ -668,6 +668,22 @@ with tab_gen:
                     for i in imgs
                 ]
             )
+    def get_invoice_images(inv_id: int):
+            with engine.begin() as conn:
+                rows = conn.execute(
+                    text("""
+                        SELECT id, title, description, image_bytes
+                        FROM invoice_images
+                        WHERE invoice_id = :id
+                        ORDER BY id
+                    """),
+                    {"id": int(inv_id)}
+                ).mappings().all()
+            return list(rows)
+
+    def delete_invoice_image(image_id: int):
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM invoice_images WHERE id = :id"), {"id": int(image_id)})
 
     # WORD-DOC BUTTON
     if st.button("📝 Generar Invoice en Word"):
@@ -824,4 +840,48 @@ with tab_arch:
                  st.success(f"Factura con ID {sel_id} eliminada.")
             except Exception as e:
                 st.error(f"No se pudo eliminar la factura: {e}")
+        # --- Image gallery for this invoice ---
+        st.markdown("### 📷 Imágenes guardadas")
+        imgs_db = get_invoice_images(int(sel_id))
+        if not imgs_db:
+            st.info("Esta factura no tiene imágenes guardadas aún.")
+        else:
+            cols = st.columns(4)
+            for i, img in enumerate(imgs_db):
+                with cols[i % 4]:
+                    st.image(img["image_bytes"], use_container_width=True)
+                    title = (img.get("title") or "").strip()
+                    desc  = (img.get("description") or "").strip()
+                    if title or desc:
+                        st.caption(f"**{title}** — {desc}".strip(" —"))
+
+                    st.download_button(
+                        "Descargar imagen",
+                        data=io.BytesIO(img["image_bytes"]),
+                        file_name=f"invoice_{sel_id}_img_{img['id']}.jpg",
+                        key=f"dlimg_{img['id']}"
+                    )
+                    if st.button("Eliminar imagen", key=f"delimg_{img['id']}"):
+                        delete_invoice_image(img["id"])
+                        st.success("Imagen eliminada.")
+                        st.rerun()  # refresh gallery
+
+        # --- Add more images to this invoice ---
+        with st.expander("➕ Agregar imágenes a esta factura"):
+            up_more = st.file_uploader(
+                "Sube 1–4 imágenes", type=["png","jpg","jpeg"], accept_multiple_files=True, key="arch_add_uploader"
+            )
+            add_title = st.text_input("Título (opcional)", key="arch_img_title")
+            add_desc  = st.text_area("Descripción (opcional)", key="arch_img_desc")
+            if st.button("Guardar imágenes", key="arch_img_save"):
+                new_imgs = []
+                for f in (up_more or [])[:4]:
+                    new_imgs.append({"title": add_title, "desc": add_desc, "bytes": f.read()})
+                if new_imgs:
+                    save_invoice_images(int(sel_id), new_imgs)
+                    st.success("Imágenes agregadas.")
+                    st.rerun()
+                else:
+                    st.info("No subiste imágenes.")
+
 
