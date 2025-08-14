@@ -5,3 +5,4 @@ python-docx
 sqlalchemy
 psycopg2-binary
 openpyxl
+psycopg2-binary>=2.9
