@@ -45,7 +45,13 @@ jobs:
             ${{ steps.meta.outputs.IMAGE }}:${{ steps.meta.outputs.TAG_LATEST }}
 
       # 🔔 Auto-redeploy Render (service-specific Deploy Hook URL stored as a secret)
-      - name: Trigger Render deploy
-        if: ${{ secrets.RENDER_DEPLOY_HOOK != '' }}
+      - name: Trigger Render deploy (if configured)
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
         run: |
-          curl -fsSL -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"
+          if [ -n "$RENDER_DEPLOY_HOOK" ]; then
+            echo "Triggering Render deploy..."
+            curl -fsSL -X POST "$RENDER_DEPLOY_HOOK"
+          else
+            echo "No RENDER_DEPLOY_HOOK set; skipping."
+          fi
