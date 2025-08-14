@@ -115,11 +115,157 @@ WEIGHT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*kg", flags=re.IGNORECASE)
 
 
 @st.cache_data
+#helpers
 def load_parts():
     with engine.connect() as conn:
         df = pd.read_sql("SELECT * FROM parts_rules", conn)
     df.columns = [c.strip() for c in df.columns]
     return df
+def save_invoice_blob(
+    customer, ubicacion, P, F, control, door_key, machine, hydraulic_cylinder,
+    grand_venta, grand_total, filename, file_bytes
+    ) -> int:
+     with engine.begin() as conn:
+        d = engine.dialect.name
+        params = dict(
+            customer=customer or "",
+            ubicacion=ubicacion or "",
+            persons=int(P or 0),
+            floors=int(F or 0),
+            control_type=control,
+            door_type=door_key,
+            machine_room=bool(machine),
+            hydraulic=bool(hydraulic_cylinder),
+            grand_venta=float(str(grand_venta).replace("$","").replace(",","")),
+            grand_total=float(str(grand_total).replace("$","").replace(",","")),
+            filename=filename,
+            file_bytes=file_bytes,
+        )
+        if d == "postgresql":
+            row = conn.execute(
+                text("""
+                INSERT INTO invoices
+                  (customer, ubicacion, persons, floors, control_type, door_type,
+                   machine_room, hydraulic, grand_venta, grand_total, filename, file_bytes)
+                VALUES
+                  (:customer, :ubicacion, :persons, :floors, :control_type, :door_type,
+                   :machine_room, :hydraulic, :grand_venta, :grand_total, :filename, :file_bytes)
+                RETURNING id
+                """),
+                params
+            ).one()
+            return int(row[0])
+        else:
+            conn.execute(
+                text("""
+                INSERT INTO invoices
+                  (customer, ubicacion, persons, floors, control_type, door_type,
+                   machine_room, hydraulic, grand_venta, grand_total, filename, file_bytes)
+                VALUES
+                  (:customer, :ubicacion, :persons, :floors, :control_type, :door_type,
+                   :machine_room, :hydraulic, :grand_venta, :grand_total, :filename, :file_bytes)
+                """),
+                params
+            )
+            row = conn.execute(text("SELECT last_insert_rowid()")).one()
+            return int(row[0])
+
+
+def list_invoices(limit=50):
+        
+        with engine.begin() as conn:
+            rows = conn.execute(
+                text("""
+                SELECT id, created_at, customer, ubicacion, persons, floors,
+                    control_type, door_type, machine_room, hydraulic,
+                    grand_venta, grand_total, filename
+                FROM invoices
+                ORDER BY created_at DESC
+                LIMIT :limit
+                """),
+                {"limit": int(limit)}
+            ).mappings().all()
+        return list(rows)
+
+def fetch_invoice_file(inv_id: int):
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT filename, file_bytes FROM invoices WHERE id = :id"),
+                {"id": int(inv_id)}
+            ).one_or_none()
+        return row  # (filename, file_bytes) or None
+
+def delete_invoice(inv_id: int):
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM invoices WHERE id = :id"),
+                {"id": int(inv_id)}
+            )
+
+def save_invoice_images(inv_id: int, imgs: list[dict]):
+        # imgs: [{"title":..., "desc":..., "bytes":...}, ...]
+        if not imgs:
+            return
+        with engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO invoice_images (invoice_id, title, description, image_bytes)
+                    VALUES (:invoice_id, :title, :description, :image_bytes)
+                """),
+                [
+                    dict(
+                        invoice_id=int(inv_id),
+                        title=(i.get("title") or "")[:200],
+                        description=(i.get("desc") or "")[:2000],
+                        image_bytes=i["bytes"],
+                    )
+                    for i in imgs
+                ]
+            )
+def get_invoice_images(inv_id: int):
+            with engine.begin() as conn:
+                rows = conn.execute(
+                    text("""
+                        SELECT id, title, description, image_bytes
+                        FROM invoice_images
+                        WHERE invoice_id = :id
+                        ORDER BY id
+                    """),
+                    {"id": int(inv_id)}
+                ).mappings().all()
+            return list(rows)
+def get_invoice_images(inv_id: int):
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT id, title, description, image_bytes
+                FROM invoice_images
+                WHERE invoice_id = :id
+                ORDER BY id
+            """),
+            {"id": int(inv_id)}
+        ).mappings().all()
+    return list(rows)
+
+def get_recent_images(limit: int = 24):
+    """Return the most recent images saved across all invoices."""
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT id, title, description, image_bytes
+                FROM invoice_images
+                ORDER BY id DESC
+                LIMIT :limit
+            """),
+            {"limit": int(limit)},
+        ).mappings().all()
+    return list(rows)
+
+def delete_invoice_image(image_id: int):
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM invoice_images WHERE id = :id"), {"id": int(image_id)})
 
 #cuarto de maquinas la mano de obra cuesta valor adicional de 350|
 #hidraulico y motor
@@ -137,6 +283,7 @@ def safe_eval(expr, ctx):
 
 def compute_lines(ctx, parts_df, cabina_price, shipping_cost, cabina_cost):
     # filter by your condition expressions
+
 
     
     mask  = parts_df["condition_expr"] \
@@ -508,6 +655,7 @@ with tab_gen:
     # Only show this when NOT hydraulic
 
     with st.expander("➕ Agregar imágenes"):
+    # --- Upload new images and save to session ---
         with st.form("image_form"):
             up = st.file_uploader(
                 "Sube 1–4 imágenes", type=["png","jpg","jpeg"], accept_multiple_files=True
@@ -529,6 +677,38 @@ with tab_gen:
                     st.success("Imágenes guardadas.")
                 else:
                     st.info("No subiste imágenes.")
+
+        # --- Library of previously saved images (ALWAYS visible) ---
+        st.markdown("##### 📚 Usar imágenes guardadas anteriormente")
+        prev_imgs = get_recent_images(limit=24)
+
+        if not prev_imgs:
+            st.info("No hay imágenes guardadas todavía.")
+        else:
+            cols = st.columns(4)
+            for i, im in enumerate(prev_imgs):
+                with cols[i % 4]:
+                    st.image(im["image_bytes"], use_container_width=True)
+                    t = (im.get("title") or "").strip()
+                    d = (im.get("description") or "").strip()
+                    if t or d:
+                        st.caption(f"**{t}** — {d}".strip(" —"))
+                    st.checkbox("Usar", key=f"use_prev_{im['id']}")
+
+            selected = [im for im in prev_imgs if st.session_state.get(f"use_prev_{im['id']}", False)]
+            if st.button("➕ Añadir seleccionadas a esta factura", key="add_selected_prev"):
+                if not selected:
+                    st.info("No hay imágenes seleccionadas.")
+                else:
+                    current = st.session_state.get("custom_images", []) or []
+                    add = [
+                        {"title": im.get("title") or "", "desc": im.get("description") or "", "bytes": im["image_bytes"]}
+                        for im in selected
+                    ]
+                    merged = (current + add)[:4]   # cap at 4
+                    st.session_state.custom_images = merged
+                    st.success(f"Se añadieron {len(merged) - len(current)} imagen(es) a esta factura.")
+
 
 # ---- Specs: shown but NOT saved anywhere (different for hidráulico vs tracción) ----
     with st.expander("📐 Especificaciones (se incluyen SIEMPRE en el Word; no se guardan en BD)"):
@@ -564,126 +744,8 @@ with tab_gen:
 
 
 
-#postgres
-    def save_invoice_blob(
-    customer, ubicacion, P, F, control, door_key, machine, hydraulic_cylinder,
-    grand_venta, grand_total, filename, file_bytes
-    ) -> int:
-     with engine.begin() as conn:
-        d = engine.dialect.name
-        params = dict(
-            customer=customer or "",
-            ubicacion=ubicacion or "",
-            persons=int(P or 0),
-            floors=int(F or 0),
-            control_type=control,
-            door_type=door_key,
-            machine_room=bool(machine),
-            hydraulic=bool(hydraulic_cylinder),
-            grand_venta=float(str(grand_venta).replace("$","").replace(",","")),
-            grand_total=float(str(grand_total).replace("$","").replace(",","")),
-            filename=filename,
-            file_bytes=file_bytes,
-        )
-        if d == "postgresql":
-            row = conn.execute(
-                text("""
-                INSERT INTO invoices
-                  (customer, ubicacion, persons, floors, control_type, door_type,
-                   machine_room, hydraulic, grand_venta, grand_total, filename, file_bytes)
-                VALUES
-                  (:customer, :ubicacion, :persons, :floors, :control_type, :door_type,
-                   :machine_room, :hydraulic, :grand_venta, :grand_total, :filename, :file_bytes)
-                RETURNING id
-                """),
-                params
-            ).one()
-            return int(row[0])
-        else:
-            conn.execute(
-                text("""
-                INSERT INTO invoices
-                  (customer, ubicacion, persons, floors, control_type, door_type,
-                   machine_room, hydraulic, grand_venta, grand_total, filename, file_bytes)
-                VALUES
-                  (:customer, :ubicacion, :persons, :floors, :control_type, :door_type,
-                   :machine_room, :hydraulic, :grand_venta, :grand_total, :filename, :file_bytes)
-                """),
-                params
-            )
-            row = conn.execute(text("SELECT last_insert_rowid()")).one()
-            return int(row[0])
 
-
-    def list_invoices(limit=50):
-        
-        with engine.begin() as conn:
-            rows = conn.execute(
-                text("""
-                SELECT id, created_at, customer, ubicacion, persons, floors,
-                    control_type, door_type, machine_room, hydraulic,
-                    grand_venta, grand_total, filename
-                FROM invoices
-                ORDER BY created_at DESC
-                LIMIT :limit
-                """),
-                {"limit": int(limit)}
-            ).mappings().all()
-        return list(rows)
-
-    def fetch_invoice_file(inv_id: int):
-        from sqlalchemy import text
-        with engine.begin() as conn:
-            row = conn.execute(
-                text("SELECT filename, file_bytes FROM invoices WHERE id = :id"),
-                {"id": int(inv_id)}
-            ).one_or_none()
-        return row  # (filename, file_bytes) or None
-
-    def delete_invoice(inv_id: int):
-        from sqlalchemy import text
-        with engine.begin() as conn:
-            conn.execute(
-                text("DELETE FROM invoices WHERE id = :id"),
-                {"id": int(inv_id)}
-            )
-
-    def save_invoice_images(inv_id: int, imgs: list[dict]):
-        # imgs: [{"title":..., "desc":..., "bytes":...}, ...]
-        if not imgs:
-            return
-        with engine.begin() as conn:
-            conn.execute(
-                text("""
-                    INSERT INTO invoice_images (invoice_id, title, description, image_bytes)
-                    VALUES (:invoice_id, :title, :description, :image_bytes)
-                """),
-                [
-                    dict(
-                        invoice_id=int(inv_id),
-                        title=(i.get("title") or "")[:200],
-                        description=(i.get("desc") or "")[:2000],
-                        image_bytes=i["bytes"],
-                    )
-                    for i in imgs
-                ]
-            )
-    def get_invoice_images(inv_id: int):
-            with engine.begin() as conn:
-                rows = conn.execute(
-                    text("""
-                        SELECT id, title, description, image_bytes
-                        FROM invoice_images
-                        WHERE invoice_id = :id
-                        ORDER BY id
-                    """),
-                    {"id": int(inv_id)}
-                ).mappings().all()
-            return list(rows)
-
-    def delete_invoice_image(image_id: int):
-            with engine.begin() as conn:
-                conn.execute(text("DELETE FROM invoice_images WHERE id = :id"), {"id": int(image_id)})
+    
 
     # WORD-DOC BUTTON
     if st.button("📝 Generar Invoice en Word"):
