@@ -114,7 +114,12 @@ def _run_schema():
 WEIGHT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*kg", flags=re.IGNORECASE)
 
 
-@st.cache_data
+@st.cache_resource
+def init_db():
+    _run_schema()
+    return True
+
+DB_READY = init_db()
 #helpers
 def load_parts():
     with engine.connect() as conn:
@@ -236,18 +241,6 @@ def get_invoice_images(inv_id: int):
                     {"id": int(inv_id)}
                 ).mappings().all()
             return list(rows)
-def get_invoice_images(inv_id: int):
-    with engine.begin() as conn:
-        rows = conn.execute(
-            text("""
-                SELECT id, title, description, image_bytes
-                FROM invoice_images
-                WHERE invoice_id = :id
-                ORDER BY id
-            """),
-            {"id": int(inv_id)}
-        ).mappings().all()
-    return list(rows)
 
 def get_recent_images(limit: int = 24):
     """Return the most recent images saved across all invoices."""
