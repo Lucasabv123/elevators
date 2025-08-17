@@ -17,7 +17,7 @@ from sqlalchemy import text
 # ── Configuration ─────────────────────────────────────────────────────────────
 HERE     = os.path.dirname(os.path.abspath(__file__))
 DB_PATH  = os.path.join(HERE, "elevators.db")
-TEMPLATE_TRACTION  = os.path.join(HERE, "invoice_template_traction.docx")
+TEMPLATE_TRACTION  = os.path.join(HERE, "invoice_template.docx")
 TEMPLATE_HYDRAULIC = os.path.join(HERE, "invoice_template_hydraulic.docx")
 IMG_DIR  = os.path.join(HERE, "images")
 
