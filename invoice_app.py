@@ -266,95 +266,102 @@ def save_parts(df: pd.DataFrame):
     with engine.begin() as conn:
         df.to_sql("parts_rules", conn, if_exists="replace", index=False)
 
+TRUE_LITS  = {"true","verdadero","sí","si","yes","y","1"}
+FALSE_LITS = {"false","falso","no","n","0",""}
+
+def _coerce_bool_like(val):
+    if isinstance(val, bool): return val
+    if val is None: return False
+    s = str(val).strip().lower()
+    if s in TRUE_LITS: return True
+    if s in FALSE_LITS: return False
+    return None
+
 def safe_eval(expr, ctx):
+    b = _coerce_bool_like(expr)
+    if b is not None:
+        return b
     try:
-        return eval(expr, {"__builtins__": None}, {**ctx, "ceil": ceil})
-    except:
+        return eval(str(expr), {"__builtins__": None}, {**ctx, "ceil": ceil})
+    except Exception:
         return False
 
 
-
 def compute_lines(ctx, parts_df, cabina_price, shipping_cost, cabina_cost):
-    # filter by your condition expressions
+    # --- filter rows by condition_expr (robust to TRUE/FALSE text) ---
+    mask = parts_df["condition_expr"].apply(lambda e: bool(safe_eval(e, ctx)))
+    rules = parts_df[mask].copy()
 
-
-    
-    mask  = parts_df["condition_expr"] \
-                    .astype(str) \
-                    .apply(lambda e: bool(safe_eval(e.strip(), ctx)))
-    rules = parts_df[mask]
-
-    lines        = []
-    total_iva    = 0.0
-    total_venta  = 0.0
-    caps         = []
+    lines, total_iva, total_venta, caps = [], 0.0, 0.0, []
 
     for _, part in rules.iterrows():
-        qty = int(safe_eval(str(part["qty_formula"]), ctx) or 0)
+        # robust qty parsing (supports expressions & booleans)
+        raw_qty = safe_eval(part.get("qty_formula", 0), ctx)
+        try:
+            qty = int(float(raw_qty))
+        except Exception:
+            qty = 0
         if qty <= 0:
             continue
 
-        iva_up   = float(part.get("iva",   0.0))
-        venta_up = float(part.get("venta", 0.0))
+        iva_up     = float(part.get("iva",   0.0))
+        venta_up   = float(part.get("venta", 0.0))
         costo_unit = float(part.get("costo", 0.0))
 
-
-        # accumulate both totals
         total_iva   += qty * iva_up
         total_venta += qty * venta_up
 
-        # weight/capacity logic unchanged
+        # weight/capacity
         uw = part.get("unit_weight", 0.0) or 0.0
-        m  = WEIGHT_RE.search(part["description"])
+        m  = WEIGHT_RE.search(str(part.get("description","")))
         if uw == 0.0 and m:
             uw = float(m.group(1))
         if uw > 0:
             caps.append(qty * uw)
 
-        # always show the IVA unit‐price in the itemized list
         lines.append({
-        "Description": part["description"],
-        "Qty":         qty,
-        "Costo Unitario":  f"${costo_unit:,.2f}",
-        "Total Costo":     f"${qty * costo_unit:,.2f}",
-        "Unit Price (IVA)":  f"${iva_up:,.2f}",
-        "Line Total (IVA)":  f"${qty * iva_up:,.2f}",
-        "Unit Price (VTA)":  f"${venta_up:,.2f}",
-        "Line Total (VTA)":  f"${qty * venta_up:,.2f}",
-         })
+            "Description": part["description"],
+            "Qty": qty,
+            "Costo Unitario":  f"${costo_unit:,.2f}",
+            "Total Costo":     f"${qty * costo_unit:,.2f}",
+            "Unit Price (IVA)": f"${iva_up:,.2f}",
+            "Line Total (IVA)": f"${qty * iva_up:,.2f}",
+            "Unit Price (VTA)": f"${venta_up:,.2f}",
+            "Line Total (VTA)": f"${qty * venta_up:,.2f}",
+        })
 
-    # Cabina one-off on both totals
+    # Cabina & envío (unchanged)
     if cabina_price > 0:
         total_iva   += cabina_price
         total_venta += cabina_price
         lines.append({
-           "Description":     "Cabina",
-            "Qty":             1,
-           "Costo Unitario":  f"${cabina_cost:,.2f}",
-           "Total Costo":     f"${cabina_cost:,.2f}",
+            "Description": "Cabina",
+            "Qty": 1,
+            "Costo Unitario":  f"${cabina_cost:,.2f}",
+            "Total Costo":     f"${cabina_cost:,.2f}",
             "Unit Price (VTA)": f"${cabina_price:,.2f}",
             "Line Total (VTA)": f"${cabina_price:,.2f}",
-           "Unit Price (IVA)": f"${cabina_price:,.2f}",
+            "Unit Price (IVA)": f"${cabina_price:,.2f}",
             "Line Total (IVA)": f"${cabina_price:,.2f}",
         })
-    #envio
+
     if shipping_cost >= 0:
         total_iva   += shipping_cost
         total_venta += shipping_cost
         lines.append({
-            "Description":    "Precio de envío",
-            "Qty":            1,
-            "Costo Unitario": f"$0.00",
-            "Total Costo":    f"$0.00",
+            "Description": "Precio de envío",
+            "Qty": 1,
+            "Costo Unitario": "$0.00",
+            "Total Costo":    "$0.00",
             "Unit Price (VTA)": f"${shipping_cost:,.2f}",
             "Line Total (VTA)": f"${shipping_cost:,.2f}",
             "Unit Price (IVA)": f"${shipping_cost:,.2f}",
             "Line Total (IVA)": f"${shipping_cost:,.2f}",
         })
-        
 
     capacity = max(caps) if caps else None
     return lines, total_iva, total_venta, capacity
+
 
 # ── Streamlit UI ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Elevator Invoice", layout="wide")
