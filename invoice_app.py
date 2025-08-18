@@ -121,6 +121,15 @@ def init_db():
 
 DB_READY = init_db()
 #helpers
+def _blob(x):
+    # Postgres returns memoryview for BYTEA; SQLite returns bytes
+    try:
+        if isinstance(x, memoryview):
+            return x.tobytes()
+    except NameError:
+        pass
+    return x
+
 def load_parts():
     with engine.connect() as conn:
         df = pd.read_sql("SELECT * FROM parts_rules", conn)
@@ -193,13 +202,15 @@ def list_invoices(limit=50):
         return list(rows)
 
 def fetch_invoice_file(inv_id: int):
-        from sqlalchemy import text
-        with engine.begin() as conn:
-            row = conn.execute(
-                text("SELECT filename, file_bytes FROM invoices WHERE id = :id"),
-                {"id": int(inv_id)}
-            ).one_or_none()
-        return row  # (filename, file_bytes) or None
+    with engine.begin() as conn:
+        row = conn.execute(
+            text("SELECT filename, file_bytes FROM invoices WHERE id = :id"),
+            {"id": int(inv_id)}
+        ).one_or_none()
+    if row is None:
+        return None
+    fname, fbytes = row
+    return fname, _blob(fbytes)
 
 def delete_invoice(inv_id: int):
         from sqlalchemy import text
@@ -230,20 +241,24 @@ def save_invoice_images(inv_id: int, imgs: list[dict]):
                 ]
             )
 def get_invoice_images(inv_id: int):
-            with engine.begin() as conn:
-                rows = conn.execute(
-                    text("""
-                        SELECT id, title, description, image_bytes
-                        FROM invoice_images
-                        WHERE invoice_id = :id
-                        ORDER BY id
-                    """),
-                    {"id": int(inv_id)}
-                ).mappings().all()
-            return list(rows)
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT id, title, description, image_bytes
+                FROM invoice_images
+                WHERE invoice_id = :id
+                ORDER BY id
+            """),
+            {"id": int(inv_id)}
+        ).mappings().all()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["image_bytes"] = _blob(d.get("image_bytes"))
+        out.append(d)
+    return out
 
 def get_recent_images(limit: int = 24):
-    """Return the most recent images saved across all invoices."""
     with engine.begin() as conn:
         rows = conn.execute(
             text("""
@@ -254,7 +269,12 @@ def get_recent_images(limit: int = 24):
             """),
             {"limit": int(limit)},
         ).mappings().all()
-    return list(rows)
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["image_bytes"] = _blob(d.get("image_bytes"))
+        out.append(d)
+    return out
 
 def delete_invoice_image(image_id: int):
     with engine.begin() as conn:
@@ -267,7 +287,8 @@ def save_parts(df: pd.DataFrame):
         df.to_sql("parts_rules", conn, if_exists="replace", index=False)
 
 TRUE_LITS  = {"true","verdadero","sí","si","yes","y","1"}
-FALSE_LITS = {"false","falso","no","n","0",""}
+# add "" so empty cells are False
+FALSE_LITS = {"false","falso","no","n","0",""}  
 
 def _coerce_bool_like(val):
     if isinstance(val, bool): return val
@@ -286,32 +307,34 @@ def safe_eval(expr, ctx):
     except Exception:
         return False
 
-
 def compute_lines(ctx, parts_df, cabina_price, shipping_cost, cabina_cost):
-    # --- filter rows by condition_expr (robust to TRUE/FALSE text) ---
     mask = parts_df["condition_expr"].apply(lambda e: bool(safe_eval(e, ctx)))
     rules = parts_df[mask].copy()
 
     lines, total_iva, total_venta, caps = [], 0.0, 0.0, []
 
     for _, part in rules.iterrows():
-        # robust qty parsing (supports expressions & booleans)
         raw_qty = safe_eval(part.get("qty_formula", 0), ctx)
-        try:
-            qty = int(float(raw_qty))
-        except Exception:
-            qty = 0
+
+        # explicit boolean handling (True->1, False->0)
+        if isinstance(raw_qty, bool):
+            qty = 1 if raw_qty else 0
+        else:
+            try:
+                qty = int(float(raw_qty))
+            except Exception:
+                qty = 0
+
         if qty <= 0:
             continue
 
-        iva_up     = float(part.get("iva",   0.0))
-        venta_up   = float(part.get("venta", 0.0))
-        costo_unit = float(part.get("costo", 0.0))
+        iva_up     = float(part.get("iva",   0.0) or 0.0)
+        venta_up   = float(part.get("venta", 0.0) or 0.0)
+        costo_unit = float(part.get("costo", 0.0) or 0.0)
 
         total_iva   += qty * iva_up
         total_venta += qty * venta_up
 
-        # weight/capacity
         uw = part.get("unit_weight", 0.0) or 0.0
         m  = WEIGHT_RE.search(str(part.get("description","")))
         if uw == 0.0 and m:
@@ -330,7 +353,6 @@ def compute_lines(ctx, parts_df, cabina_price, shipping_cost, cabina_cost):
             "Line Total (VTA)": f"${qty * venta_up:,.2f}",
         })
 
-    # Cabina & envío (unchanged)
     if cabina_price > 0:
         total_iva   += cabina_price
         total_venta += cabina_price
@@ -345,7 +367,7 @@ def compute_lines(ctx, parts_df, cabina_price, shipping_cost, cabina_cost):
             "Line Total (IVA)": f"${cabina_price:,.2f}",
         })
 
-    if shipping_cost >= 0:
+    if shipping_cost > 0:  # optional: avoid showing a $0 shipping line
         total_iva   += shipping_cost
         total_venta += shipping_cost
         lines.append({
@@ -361,6 +383,7 @@ def compute_lines(ctx, parts_df, cabina_price, shipping_cost, cabina_cost):
 
     capacity = max(caps) if caps else None
     return lines, total_iva, total_venta, capacity
+
 
 
 # ── Streamlit UI ───────────────────────────────────────────────────────────────
